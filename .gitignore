@@ -33,3 +33,10 @@ npm-debug.log*
 
 # Coverage
 coverage/
+
+# ZKP build artifacts (large ceremony files)
+*.ptau
+screenshots/cropped/
+
+# Temp scripts
+crop_screenshots.py

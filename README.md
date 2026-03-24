@@ -1,7 +1,8 @@
-# Will-on-Chain: Decentralized Blockchain Will & Inheritance System
+# Will-On-Chain: Decentralized Crypto Inheritance System
 
-A fully decentralized, trustee-less will and crypto-asset inheritance system built on Ethereum. Owners create wills, deposit multi-asset portfolios (ETH, ERC-20, ERC-721, ERC-1155), assign percentage-based heirs, and rely on time-based liveness detection with zero-knowledge proof verification — all without any centralized authority or trusted third party.
+A fully decentralized, trustless will and inheritance execution system built on Ethereum. Owners create wills, deposit multi-asset portfolios (ETH, ERC-20, ERC-721, ERC-1155), assign heirs with percentage shares, and the system autonomously detects owner inactivity through a time-based heartbeat mechanism. Inheritance is executed on-chain only after a multi-phase confirmation pipeline — including zero-knowledge proof age verification (Groth16) and iden3/Privado DID-based liveness proofs — ensuring no single party can prematurely trigger asset distribution.
 
+> **Research Paper**: This implementation accompanies the research paper *"Decentralized Crypto-Asset Inheritance Using Smart Contracts, Zero-Knowledge Proofs, and DID-Based Liveness Verification"*.
 
 ---
 
@@ -10,848 +11,655 @@ A fully decentralized, trustee-less will and crypto-asset inheritance system bui
 - [Architecture Overview](#architecture-overview)
 - [Smart Contract Inheritance Chain](#smart-contract-inheritance-chain)
 - [Will State Machine](#will-state-machine)
-- [Core Formulas & Time Constants](#core-formulas--time-constants)
+- [Mathematical Formulas & Timing](#mathematical-formulas--timing)
+- [Zero-Knowledge Proof Systems](#zero-knowledge-proof-systems)
+  - [Age Verification ZKP](#1-age-verification-zkp-groth16--4-signals)
+  - [DID Liveness Proof](#2-did-liveness-proof-groth16--5-signals)
 - [Deployment Guide (Remix IDE)](#deployment-guide-remix-ide)
-- [Web Application Setup](#web-application-setup)
-- [Feature Walkthrough](#feature-walkthrough)
-  - [1. Connect Wallet & Enter Contract Address](#1-connect-wallet--enter-contract-address)
-  - [2. Dashboard](#2-dashboard)
-  - [3. Create Will (4-Step Wizard)](#3-create-will-4-step-wizard)
-  - [4. Manage Will](#4-manage-will)
-  - [5. Heartbeat & Liveness](#5-heartbeat--liveness)
-  - [6. Inheritance Execution](#6-inheritance-execution)
-  - [7. Claims (Pull-Based)](#7-claims-pull-based)
-  - [8. Test Tokens](#8-test-tokens)
-- [ZKP Integration Details](#zkp-integration-details)
-- [Backend API Reference](#backend-api-reference)
-- [Tech Stack](#tech-stack)
+- [Web Application](#web-application)
+  - [Setup & Contract Connection](#1-setup--contract-connection)
+  - [Dashboard](#2-dashboard)
+  - [Create Will (4-Step Wizard)](#3-create-will-4-step-wizard)
+  - [Manage Will](#4-manage-will)
+  - [Heartbeat & Liveness](#5-heartbeat--liveness)
+  - [Inheritance Execution](#6-inheritance-execution)
+  - [Claims (Pull-Based)](#7-claims-pull-based)
+  - [Test Tokens](#8-test-tokens)
+- [Backend API](#backend-api)
+- [Running Locally](#running-locally)
+- [Project Structure](#project-structure)
 
 ---
 
 ## Architecture Overview
 
-```
-+---------------------------+       +---------------------------+
-|     React.js Frontend     |       |    Node.js Backend API    |
-|   (ethers.js v6 + MetaMask)  |       |   (Express + ethers.js)   |
-+-------------+-------------+       +-------------+-------------+
-              |                                   |
-              |   Write Transactions              |  Read-Only Queries
-              |   (via MetaMask signer)           |  (via JsonRpcProvider)
-              v                                   v
-+-------------------------------------------------------------+
-|              Ethereum Blockchain (Sepolia / Local)           |
-|                                                             |
-|  +--------------------+  +--------------------+             |
-|  | Groth16Verifier    |  | Groth16Verifier    |             |
-|  | (4-signal: Age)    |  | (5-signal: DID)    |             |
-|  +--------+-----------+  +--------+-----------+             |
-|           |                       |                         |
-|           v                       v                         |
-|  +-----------------------------------------------+         |
-|  |         UnifiedWillManager                     |         |
-|  |  (WillTypes -> WillStorage -> HeartbeatMgr     |         |
-|  |   -> AssetMgr -> ExecutionMgr -> WillMgr)      |         |
-|  +-----------------------------------------------+         |
-|                                                             |
-|  +------------------+  +------------------+  +------------+ |
-|  | TestUSDC (ERC20) |  | CryptoArtNFT(721)|  |GameAssets  | |
-|  +------------------+  +------------------+  | (ERC-1155) | |
-|                                              +------------+ |
-+-------------------------------------------------------------+
-```
+The system comprises three layers:
 
-The frontend handles all **write transactions** through MetaMask. The backend provides **read-only** blockchain queries for dashboard data, event indexing, and pending claim lookups.
+| Layer | Components | Purpose |
+|-------|-----------|---------|
+| **Smart Contracts** | 12 Solidity contracts (inheritance chain) | On-chain will logic, asset custody, heartbeat, ZKP verification |
+| **ZKP Circuits** | 2 Circom circuits + Groth16 provers | Privacy-preserving age verification and DID liveness proofs |
+| **Web Application** | React.js frontend + Node.js backend | User interface for all contract interactions via MetaMask |
+
+The owner deploys contracts via **Remix IDE** on any EVM chain (Sepolia testnet recommended), then pastes the deployed contract address into the web app to interact with the system.
 
 ---
 
 ## Smart Contract Inheritance Chain
 
-The system uses a modular Solidity inheritance chain to stay within EIP-170 bytecode limits:
+The contracts follow a strict single-inheritance chain to stay within EVM bytecode size limits (EIP-170: 24,576 bytes):
 
-| Contract | Role | Key Functions |
-|----------|------|---------------|
-| **WillTypes.sol** | Shared enums, structs, type definitions | `WillState`, `Asset`, `Heir`, `DIDRegistration`, `HeirRotationRequest` |
-| **WillStorage.sol** | Storage layout, constants, events | All mappings, time constants, EIP-712 typehash |
-| **HeartbeatManager.sol** | Liveness proofs & death confirmation flow | `recordHeartbeat()`, `recordHeartbeatWithDIDProof()`, `detectInactivity()`, `startGracePeriod()`, `finalizeGracePeriod()` |
-| **AssetManager.sol** | Multi-asset deposit with auto-approval | `addETHAsset()`, `addERC20Asset()`, `addERC721Asset()`, `addERC1155AssetFungible()`, `addERC1155AssetNFT()` |
-| **ExecutionManager.sol** | Batch inheritance distribution & claims | `executeInheritanceBatch()`, `claimETH()`, `claimERC20()`, `sweepUnclaimedETH()` |
-| **WillManager.sol** (UnifiedWillManager) | Top-level facade, constructor, will CRUD | `createWill()`, `activateWill()`, `cancelWill()`, `verifyHeirAge()`, `rotateHeirAddress()` |
+```
+WillTypes.sol          (Enums, structs, constants)
+    └── WillStorage.sol     (State variables, mappings, modifiers)
+        └── HeartbeatManager.sol  (Heartbeat recording, delegation, DID proof)
+            └── AssetManager.sol      (ETH/ERC-20/ERC-721/ERC-1155 deposits)
+                └── ExecutionManager.sol  (Batch execution, claims, sweeps)
+                    └── WillManager.sol       (Will creation, activation, disputes)
+                        = UnifiedWillManager  (Deployed entry point)
+```
 
-**Auxiliary Contracts:**
-
+**Supporting contracts:**
 | Contract | Purpose |
 |----------|---------|
-| **AgeVerifier.sol** | Groth16 verifier for 4-signal age proofs (generated by snarkJS) |
-| **Verifier.sol** | Groth16 verifier for 5-signal DID liveness proofs |
-| **AgeVerificationSystem.sol** | Wrapper combining age verification logic |
-| **LivenessRegistry.sol** | Standalone DID registry (merged into HeartbeatManager) |
-| **ERC721FractionalWrapper.sol** | Wraps ERC-721 NFTs into fractional ERC-1155 shares |
-| **NFTGovernanceWrapper.sol** | t-of-n threshold multisig for NFT governance |
-| **ILivenessVerifier.sol** | Interface for the DID liveness verifier |
+| `AgeVerifier.sol` | Groth16 verifier for 4-signal age proof |
+| `Verifier.sol` | Groth16 verifier for 5-signal DID liveness proof |
+| `LivenessRegistry.sol` | On-chain DID liveness record storage |
+| `AgeVerificationSystem.sol` | Wrapper combining age verifier + will manager |
+| `ERC721FractionalWrapper.sol` | Wraps indivisible NFTs into fungible shares |
+| `NFTGovernanceWrapper.sol` | t-of-n threshold multisig for shared NFT governance |
+| `ILivenessVerifier.sol` | Interface for liveness verification |
+
+**Test tokens (for Sepolia testing):**
+| Contract | Standard | Purpose |
+|----------|----------|---------|
+| `TestUSDC.sol` | ERC-20 | Faucet: mint 1000 USDC per call |
+| `CryptoArtNFT.sol` | ERC-721 | Mint NFTs with metadata URI |
+| `GameAssetsNFT.sol` | ERC-1155 | Faucet: mint fungible game items |
+| `MockVerifier.sol` | — | Always-true verifier for testing |
 
 ---
 
 ## Will State Machine
 
+Every will transitions through a strict state machine. No state can be skipped.
+
 ```
-  Created ──activate()──> Active ──heartbeat expires──> OwnerInactive
-     |                      |                               |
-  cancel()              recover()                   +30 days (CONFIRMATION_DELAY)
-     |                      |                               |
-     v                      v                               v
-  Cancelled             Active                        GracePeriod
-                                                         |
-                                                   +90 days (GRACE_DURATION)
-                                                         |
-                                                         v
-                                                   PendingHeirProof
-                                                    |           |
-                                              dispute()    all heirs verified
-                                                    |           |
-                                                    v           v
-                                                Disputed   ReadyToExecute
-                                                    |           |
-                                              resolve/expire   executeBatch()
-                                                    |           |
-                                                    v           v
-                                               (prev state)  Executing ──> Executed
+                    ┌──────────────────────────────────────────┐
+                    │              Owner recovers               │
+                    │          (recordHeartbeat / recoverWill)  │
+                    ▼                                          │
+┌─────────┐   activateWill   ┌────────┐   heartbeat   ┌──────────────┐
+│ Created │ ───────────────► │ Active │ ◄──────────── │ OwnerInactive│
+└─────────┘                  └────────┘  expires ───► └──────────────┘
+     │                            │                        │
+     │ cancelWill                 │                  after INACTIVITY_
+     ▼                            │               CONFIRMATION_DELAY
+┌───────────┐                     │                        │
+│ Cancelled │                     │                        ▼
+└───────────┘                     │               ┌──────────────┐
+                                  │               │ GracePeriod  │
+                                  │               └──────────────┘
+                                  │                        │
+                                  │              after GRACE_PERIOD_
+                                  │                   DURATION
+                                  │                        ▼
+                                  │               ┌────────────────┐
+                                  │               │PendingHeirProof│
+                                  │               └────────────────┘
+                                  │                        │
+                                  │               all heirs submit
+                                  │                  ZKP age proof
+                                  │                        ▼
+                                  │               ┌────────────────┐
+                                  │               │ReadyToExecute  │
+                                  │               └────────────────┘
+                                  │                        │
+                                  │              executeInheritanceBatch
+                                  │                        ▼
+                                  │               ┌───────────┐
+                                  │               │ Executing │
+                                  │               └───────────┘
+                                  │                        │
+                                  │               all assets distributed
+                                  │                        ▼
+                                  │               ┌──────────┐
+                                  └──────────────►│ Executed  │
+                                                  └──────────┘
 ```
 
-**Key State Transitions:**
-- **Created -> Active**: Owner calls `activateWill()` after adding heirs (shares must sum to 100%) and depositing assets
-- **Active -> OwnerInactive**: Anyone calls `detectInactivity()` when `block.timestamp > lastHeartbeat + heartbeatInterval`
-- **OwnerInactive -> GracePeriod**: Anyone calls `startGracePeriod()` after `INACTIVITY_CONFIRMATION_DELAY` (30 days)
-- **GracePeriod -> PendingHeirProof**: A registered heir calls `finalizeGracePeriod()` after `GRACE_PERIOD_DURATION` (90 days)
-- **PendingHeirProof -> ReadyToExecute**: All heirs submit valid ZKP age proofs via `verifyHeirAge()`
-- **ReadyToExecute -> Executing -> Executed**: Anyone calls `executeInheritanceBatch()` to distribute assets
-
-**Recovery**: The owner can call `recoverWill()` from `OwnerInactive` or `GracePeriod` to return to `Active`.
+**Key transitions:**
+- **Created → Active**: Owner calls `activateWill()` after adding heirs (shares must total 100%) and depositing assets
+- **Active → OwnerInactive**: Anyone calls `detectInactivity()` after `lastHeartbeat + heartbeatInterval` has passed
+- **OwnerInactive → GracePeriod**: Anyone calls `startGracePeriod()` after `INACTIVITY_CONFIRMATION_DELAY` (30 days)
+- **GracePeriod → PendingHeirProof**: A registered heir calls `finalizeGracePeriod()` after `GRACE_PERIOD_DURATION` (90 days)
+- **PendingHeirProof → ReadyToExecute**: All heirs submit valid Groth16 age proofs via `verifyHeirAge()`
+- **ReadyToExecute → Executing → Executed**: Anyone calls `executeInheritanceBatch()` to distribute assets
 
 ---
 
-## Core Formulas & Time Constants
+## Mathematical Formulas & Timing
 
 ### Inactivity Detection
 
-An owner is considered inactive when their heartbeat has expired:
-
 ```
-isInactive(will) = (block.timestamp > will.lastHeartbeat + heartbeatInterval(will))
+isInactive(owner, willId) = (block.timestamp > lastHeartbeat + heartbeatInterval)
 ```
 
-Where:
+| Constant | Default Value | Description |
+|----------|--------------|-------------|
+| `DEFAULT_HEARTBEAT_INTERVAL` | 180 days | Time before owner is considered inactive |
+| `INACTIVITY_CONFIRMATION_DELAY` | 30 days | Buffer after inactivity detection |
+| `GRACE_PERIOD_DURATION` | 90 days | Final window for owner to recover |
+| `HEIR_PROOF_DEADLINE` | 180 days | Time for heirs to submit age proofs |
+| `DISPUTE_PERIOD` | 30 days | Window to raise disputes |
+| `DISPUTE_BOND` | 0.1 ETH | Required deposit to raise a dispute |
+| `UNCLAIMED_ASSET_DEADLINE` | 365 days | After which unclaimed assets can be swept |
+
+**Total time from last heartbeat to execution:**
 ```
-heartbeatInterval(will) = will.heartbeatIntervalOverride > 0
-                          ? will.heartbeatIntervalOverride
-                          : DEFAULT_HEARTBEAT_INTERVAL (30 days = 2,592,000 seconds)
-```
-
-### Total Time Before Execution
-
-The minimum time from the owner's last heartbeat to inheritance execution:
-
-```
-T_total = heartbeatInterval + INACTIVITY_CONFIRMATION_DELAY + GRACE_PERIOD_DURATION
-        = 30 days + 30 days + 90 days
-        = 150 days (minimum, with default heartbeat interval)
-```
-
-### Time Constants (from WillStorage.sol)
-
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `DEFAULT_HEARTBEAT_INTERVAL` | 30 days | Default time between heartbeats |
-| `INACTIVITY_CONFIRMATION_DELAY` | 30 days | Wait after OwnerInactive before grace period |
-| `GRACE_PERIOD_DURATION` | 90 days | Grace period for owner recovery |
-| `DISPUTE_PERIOD` | 7 days | Time window for dispute resolution |
-| `DISPUTE_BOND` | 0.1 ETH | Required bond to raise a dispute |
-| `HEIR_PROOF_DEADLINE` | 180 days | Deadline for heirs to submit age proofs |
-| `UNCLAIMED_ASSET_DEADLINE` | 365 days | Deadline to claim assets before sweep |
-| `AUTO_PUSH_GAS_LIMIT` | 50,000 gas | Gas limit for auto-push transfers |
-| `MAX_BATCH_SIZE` | 10 | Maximum heirs processed per batch |
-
-### Heir Share Allocation (Basis Points)
-
-Shares are stored in basis points (0-10000) where 10000 = 100%:
-
-```
-sharePercent = sharePercentage / 100
-
-// For divisible assets (ETH, ERC-20):
-heirAmount = (totalAssetAmount * heir.sharePercentage) / 10000
+T_total = heartbeatInterval + INACTIVITY_CONFIRMATION_DELAY + GRACE_PERIOD_DURATION + heir_proof_time
+        = 180 + 30 + 90 + (up to 180)
+        = 300 to 480 days minimum
 ```
 
-For example, if an heir has `sharePercentage = 5000` (50%) and the will holds 2 ETH:
-```
-heirAmount = (2 ETH * 5000) / 10000 = 1 ETH
-```
+### Asset Distribution Formula
 
-### ZKP Age Verification (Groth16, 4 signals)
-
-The age verification circuit proves a heir is old enough without revealing their exact birthdate:
+For divisible assets (ETH, ERC-20, fungible ERC-1155):
 
 ```
-Public Signals: [willId, minimumAge, currentYear, birthdateCommitment]
+heir_amount = (asset.amount * heir.sharePercentage) / 10000
 ```
 
-The circuit checks:
+Where `sharePercentage` is in **basis points** (1% = 100 bps, 100% = 10000 bps).
+
+Example: If a will has 2 ETH and an heir has 5000 bps (50%):
 ```
-currentYear - birthYear >= minimumAge
-Poseidon(birthYear, birthMonth, birthDay) == birthdateCommitment
+heir_amount = (2 ETH * 5000) / 10000 = 1 ETH
 ```
 
-### DID Liveness Verification (Groth16, 5 signals)
+For indivisible assets (ERC-721 NFTs): assigned to a `specificHeir` at deposit time.
 
-The DID liveness circuit verifies the owner's iden3/Privado credential:
+### Distribution Strategy: Auto-Push with Pull Fallback
 
 ```
-Public Signals: [isValid, didHash, expirationDate, revocationNonce, currentTimestamp]
+for each heir:
+    try:
+        directTransfer(heir, amount)     // Auto-push (saves gas for heir)
+    catch:
+        pendingBalance[heir] += amount   // Pull-based fallback
+        emit AutoPushAttempted(heir, willId, false)
 ```
 
-Validation checks in the smart contract:
+This ensures assets are never stuck if a recipient contract rejects transfers.
+
+---
+
+## Zero-Knowledge Proof Systems
+
+The system uses two independent Groth16 ZKP circuits on the BN128 curve.
+
+### 1. Age Verification ZKP (Groth16 — 4 signals)
+
+**Circuit**: `age-verification-zkp/circuits/ageVerification.circom`
+
+**Purpose**: Prove an heir meets the minimum age requirement without revealing their birth year.
+
+**Private inputs** (known only to the heir):
+| Input | Description |
+|-------|-------------|
+| `birthYear` | Heir's year of birth (e.g., 2000) |
+| `salt` | Random 256-bit secret shared privately by the will owner |
+
+**Public inputs** (visible on-chain):
+| Signal | Description |
+|--------|-------------|
+| `willId` | The will being claimed |
+| `minimumAge` | Required age set by owner (e.g., 18) |
+| `currentYear` | Current calendar year (e.g., 2025) |
+| `commitment` | `birthYear + salt + willId` — stored on-chain when adding heir |
+
+**Circuit constraints:**
 ```
-pubSignals[0] == 1                              // proof indicates valid
-pubSignals[1] == will.ownerDidHash              // DID hash matches registered DID
-pubSignals[2] > block.timestamp                 // credential not expired
-!usedLivenessNonces[pubSignals[3]]              // nonce not replayed
-|pubSignals[4] - block.timestamp| <= 300        // timestamp within 5-minute window
+1. commitment === birthYear + salt + willId        // Commitment verification
+2. age = currentYear - birthYear                   // Age computation
+3. ageDiff = age - minimumAge >= 0                 // Age check (via Num2Bits)
+4. birthYear >= 1900                               // Sanity: valid birth year
+5. currentYear >= birthYear                        // Sanity: not born in future
 ```
+
+**How to generate a proof:**
+
+**Step 1 — Owner creates commitment** (when adding heir):
+```bash
+cd age-verification-zkp
+# Edit input/heir_data.json:
+# { "heirName": "Bob", "birthYear": 2000, "willId": 0, "minimumAge": 18 }
+node scripts/generate_commitment.js
+```
+This outputs the `commitment` value to store in `addHeir()` and a `salt` to share privately with the heir.
+
+**Step 2 — Heir generates proof** (when claiming):
+```bash
+cd age-verification-zkp
+# The heir needs: birthYear, salt (from owner), willId, minimumAge, currentYear
+npx snarkjs groth16 fullprove input.json build/ageVerification_js/ageVerification.wasm build/circuit_final.zkey proof.json public.json
+```
+
+**Step 3 — Submit to web app:**
+From the generated `proof.json` and `public.json`:
+- `pA` = `[proof.pi_a[0], proof.pi_a[1]]`
+- `pB` = `[[proof.pi_b[0][0], proof.pi_b[0][1]], [proof.pi_b[1][0], proof.pi_b[1][1]]]`
+- `pC` = `[proof.pi_c[0], proof.pi_c[1]]`
+- `pubSignals` = `[willId, minimumAge, currentYear, commitment]` from `public.json`
+
+**Example values** (from `proof.json` and `public.json` in this repo):
+```
+pA: ["8887550305944791569609117721674170190489743469566173293412753564986762741306",
+     "19748736924275928554651697435388713683297811180451614505594996421450728500601"]
+
+pB: [["10216270992264601418163177268597954039852711356895109953461312772108666494042",
+      "11606176017576377872517733797435321551481640704542878276655539065760976665100"],
+     ["19028924012671378012035331825748636864676831654437159336642728526630439996290",
+      "7085680636399188750386084991801548779403120405075926243251753981692521729231"]]
+
+pC: ["21598111523972276222723216592844054688134917828117945618557825238783089139784",
+     "17001214953921436234432925333703016817183640998324586206492027043272489933079"]
+
+pubSignals: ["0", "18", "2025", "123456789012345678901234569890"]
+             willId  minAge  year    commitment
+```
+
+### 2. DID Liveness Proof (Groth16 — 5 signals)
+
+**Circuit**: `proof-of-life/circuits/liveness.circom`
+
+**Purpose**: Prove the will owner is alive using an iden3/Privado DID credential with face-liveness verification, without revealing the credential contents.
+
+**Private inputs:**
+| Input | Description |
+|-------|-------------|
+| `livenessTimestamp` | Timestamp when face verification was performed |
+| `signature` | Credential signature from the issuer |
+
+**Public inputs (5 signals):**
+| Signal | Index | Description |
+|--------|-------|-------------|
+| `isValid` | 0 | 1 if proof is valid, 0 otherwise |
+| `didHash` | 1 | SHA-256 hash of the DID string, reduced mod BN128 field |
+| `expirationDate` | 2 | Unix timestamp when the credential expires |
+| `revocationNonce` | 3 | Nonce for credential revocation checking |
+| `currentTimestamp` | 4 | Unix timestamp at proof generation time |
+
+**Circuit constraints:**
+```
+1. currentTimestamp < expirationDate               // Credential not expired
+2. livenessTimestamp * didHash * expirationDate     // All fields non-zero
+   * revocationNonce != 0
+3. isValid = (currentTimestamp < expirationDate)    // Output signal
+```
+
+**How to generate a proof from a Privado ID credential:**
+
+**Step 1 — Get a liveness credential:**
+Use the [Privado ID app](https://www.privado.id/) to perform face-liveness verification. This produces a JSON credential file.
+
+**Step 2 — Generate ZKP:**
+```bash
+cd proof-of-life
+# Place your credential at input/credential.json
+node scripts/parse_and_generate.js
+```
+
+The script automatically:
+1. Extracts `livenessTimestamp`, `expirationDate`, `revocationNonce` from the credential JSON
+2. Computes `didHash = SHA256(did_string) mod BN128_FIELD_PRIME`
+   where `BN128_FIELD_PRIME = 21888242871839275222246405745257275088548364400416034343698204186575808495617`
+3. Generates the Groth16 proof using snarkjs
+4. Outputs `proof.json`, `public.json`, and `remix_data.json`
+
+**Step 3 — Submit to web app** (DID Liveness Heartbeat):
+
+From `output/remix_data.json`, copy the hex values:
+```json
+{
+  "proof": {
+    "a": ["0x2c596681...", "0x2bc4ea89..."],
+    "b": [["0x294afd35...", "0x164c5ceb..."], ["0x01480b45...", "0x19fdbea2..."]],
+    "c": ["0x2004c9df...", "0x19874373..."]
+  },
+  "publicSignals": {
+    "isValid": "0x...01",
+    "didHash": "0x2a9e3db5...",
+    "expirationDate": "0x...69a5726b",
+    "revocationNonce": "0x...16b9e7c0",
+    "currentTimestamp": "0x...69748f6a"
+  }
+}
+```
+
+For the **DID Liveness Heartbeat** form in the web app:
+- **Proof A**: `["pi_a[0]", "pi_a[1]"]` as JSON
+- **Proof B**: `[["pi_b[0][0]", "pi_b[0][1]"], ["pi_b[1][0]", "pi_b[1][1]"]]` as JSON
+- **Proof C**: `["pi_c[0]", "pi_c[1]"]` as JSON
+- **Public Signals**: `[isValid, didHash, expirationDate, revocationNonce, currentTimestamp]` as JSON
+
+> **DID Hash for registration**: When creating a will, the `ownerDidHash` parameter should be the decimal value of `SHA256(your_DID_string) mod BN128_FIELD_PRIME`. The `parse_and_generate.js` script outputs this value.
 
 ---
 
 ## Deployment Guide (Remix IDE)
 
 ### Prerequisites
-- MetaMask wallet with Sepolia ETH (use a [Sepolia faucet](https://sepoliafaucet.com/))
-- [Remix IDE](https://remix.ethereum.org/)
+- MetaMask wallet with Sepolia ETH (use a [Sepolia faucet](https://cloud.google.com/application/web3/faucet/ethereum/sepolia))
+- [Remix IDE](https://remix.ethereum.org)
 
 ### Step 1: Deploy Groth16 Verifiers
 
-1. Open Remix IDE and create two files:
-   - `AgeVerifier.sol` (from `Solidity-code/ZKProofs/AgeVerifier.sol`)
-   - `Verifier.sol` (from `Solidity-code/ZKProofs/Verifier.sol`)
-2. Compile each with Solidity `^0.8.20` and **optimizer enabled (200 runs)**
-3. Deploy `AgeVerifier.sol` -> note the deployed address (e.g., `0xAgeVerifierAddr...`)
-4. Deploy `Verifier.sol` -> note the deployed address (e.g., `0xLivenessVerifierAddr...`)
+1. Open Remix IDE, create `AgeVerifier.sol` and `Verifier.sol` from the `Solidity-code/ZKProofs/` folder
+2. Compile with Solidity **0.8.20+**, optimizer enabled (200 runs)
+3. Deploy `AgeVerifier` → copy the deployed address
+4. Deploy `Verifier` (the 5-signal liveness verifier) → copy the deployed address
+
+> **For testing**: Deploy `MockVerifier.sol` from `TestTokens/` instead — it accepts any proof.
 
 ### Step 2: Deploy UnifiedWillManager
 
-1. Upload all contract files to Remix in the same folder structure
-2. Compile `WillManager.sol` with **optimizer enabled (200 runs)**
-3. **Important**: Set gas limit to **30,000,000** in Remix (default 3M is not enough)
-4. Deploy with constructor arguments:
-   ```
-   _heirAgeVerifier: 0xAgeVerifierAddr...
-   _livenessVerifier: 0xLivenessVerifierAddr...
-   ```
-5. Note the deployed `UnifiedWillManager` address
+1. Upload all Solidity files from `Solidity-code/` to Remix (maintain the inheritance chain)
+2. Compile `WillManager.sol` with optimizer enabled (200 runs)
+3. Deploy with constructor arguments: `(ageVerifierAddress, livenessVerifierAddress)`
+4. **Important**: Set gas limit to **30,000,000** in Remix (default 3M is insufficient)
+5. Copy the deployed UnifiedWillManager address
 
-> **Note on EIP-3860**: If deploying on Remix VM (Shanghai+), you may hit the 49,152 byte initcode limit. Use a pre-Shanghai VM (Merge/London) or deploy on Sepolia testnet with optimizer enabled.
+> **Note**: If you hit EIP-3860 initcode size limits on Remix VM, use a pre-Shanghai VM (Merge/London) or deploy to Sepolia directly.
 
 ### Step 3: Deploy Test Tokens (Optional)
 
-1. Deploy `TestUSDC.sol` — call `faucet()` to get 1000 USDC
-2. Deploy `CryptoArtNFT.sol` — call `safeMint(yourAddress, "tokenURI")` to mint NFTs
-3. Deploy `GameAssetsNFT.sol` — call `faucet(tokenId, amount)` to get game assets
+1. Deploy `TestUSDC.sol` → ERC-20 faucet (1000 tokens per mint)
+2. Deploy `CryptoArtNFT.sol` → ERC-721 with metadata URI
+3. Deploy `GameAssetsNFT.sol` → ERC-1155 fungible game items
+
+### Step 4: Connect Web App
+
+Paste the UnifiedWillManager address into the web app's setup screen.
 
 ---
 
-## Web Application Setup
+## Web Application
 
-### Prerequisites
-- Node.js >= 16
-- MetaMask browser extension
-- Deployed contract addresses from Remix
+The web app is a standalone **React.js** frontend + **Node.js/Express** backend that interacts with the deployed smart contracts via MetaMask.
 
-### Installation
-
-```bash
-cd will-app
-
-# Install all dependencies (root + backend + frontend)
-npm run install:all
-```
-
-### Running
-
-```bash
-# Start backend (port 3001) and frontend (port 3000) concurrently
-npm start
-```
-
-Or run individually:
-```bash
-# Backend only
-cd backend && node server.js
-
-# Frontend only
-cd frontend && npm start
-```
-
-### Environment Configuration (Backend)
-
-Create `backend/.env`:
-```env
-PORT=3001
-RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY
-```
-
-The backend defaults to `http://127.0.0.1:8545` if no RPC URL is set.
-
----
-
-## Feature Walkthrough
-
-### 1. Connect Wallet & Enter Contract Address
-
-When you first open the app, you see the landing page with a **Connect MetaMask** button. After connecting, you are prompted to enter the **UnifiedWillManager** contract address that you deployed via Remix IDE.
+### 1. Setup & Contract Connection
 
 ![Setup - Enter Contract Address](screenshots/01-setup-enter-contract.png)
 
-**How it works:**
-- Click **Connect MetaMask** to link your wallet
-- The app reads your address and chain ID (e.g., Sepolia = 11155111)
-- Paste the `UnifiedWillManager` contract address you deployed from Remix
-- The address is validated against the pattern `0x[a-fA-F0-9]{40}`
-- It is stored in `localStorage` so you don't need to re-enter it on refresh
-- Deploy hint: `UnifiedWillManager(ageVerifierAddr, livenessVerifierAddr)`
+After connecting MetaMask, paste the deployed **UnifiedWillManager** contract address. The app validates the Ethereum address format (`0x` + 40 hex characters) and persists it in `localStorage`.
+
+**Parameters:**
+| Field | Value | Description |
+|-------|-------|-------------|
+| Contract Address | `0x...` (40 hex chars) | The deployed UnifiedWillManager address from Remix |
 
 ---
 
 ### 2. Dashboard
 
-The Dashboard shows all wills owned by the connected wallet, system constants, and detailed will information.
-
 ![Dashboard](screenshots/02-dashboard-empty.png)
 
-**Parameters displayed:**
-- **Your Wills**: Lists all wills by ID with state (Created/Active/Executed etc.)
-- **System Constants**: The on-chain time parameters (`DEFAULT_HEARTBEAT_INTERVAL`, `INACTIVITY_CONFIRMATION_DELAY`, `GRACE_PERIOD_DURATION`, `DISPUTE_PERIOD`, `DISPUTE_BOND`)
-- **Will Details** (when a will exists): Owner address, asset count, heir count, state, last heartbeat timestamp, heartbeat interval, inactivity status, assets table, heirs table with share percentages
+Displays all wills owned by the connected wallet address. For each will, shows:
+- **State**: Current state in the state machine (color-coded badge)
+- **Asset count**: Number of deposited assets
+- **Heir count**: Number of registered heirs
+- **Last heartbeat**: Timestamp of the most recent heartbeat
+- **Heartbeat interval**: Custom or default (180 days)
+
+The dashboard calls `willCount(address)` to get the total, then iterates `getWill()` and `getWillDetails()` for each.
 
 ---
 
 ### 3. Create Will (4-Step Wizard)
 
-The Create Will tab guides you through a **4-step wizard** with a visual progress indicator.
-
 ![Create Will - Step 1](screenshots/03-create-will-step1.png)
 
-#### Step 1: Create New Will
+A guided 4-step process with a visual progress indicator:
 
-**Parameters:**
-| Field | Type | Description | Example |
-|-------|------|-------------|---------|
-| Owner DID Hash | `uint256` | SHA-256 hash of your iden3/Privado DID identifier, modulo the BN128 scalar field. Enter `0` to skip DID registration. | `0` or `123456789...` |
-| Fallback Beneficiary | `address` | Address that receives unclaimed assets after `UNCLAIMED_ASSET_DEADLINE` (365 days). Leave empty to default to your own address. | `0x742d35Cc...` |
+#### Step 1: Create Will
+Calls `createWill(ownerDidHash, fallbackBeneficiary)`.
 
-**What happens on-chain:** Calls `createWill(didHash, fallbackBeneficiary)` which initializes a new `Will` struct in state `Created`, assigns a `willId`, sets `createdAt = block.timestamp`, and emits `WillCreated(owner, willId)`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ownerDidHash` | `uint256` | SHA-256 hash of your iden3 DID (mod BN128 field). Enter `0` to skip DID registration. |
+| `fallbackBeneficiary` | `address` | Address for unclaimed assets after deadline. Defaults to `address(0)` = will owner. |
 
 #### Step 2: Add Heirs
+Calls `addHeir(willId, heirAddress, sharePercentage, birthdateCommitment, minimumAge, vestingPeriod)` for each heir.
 
-**Parameters:**
-| Field | Type | Description | Example |
-|-------|------|-------------|---------|
-| Heir Address | `address` | Ethereum address of the heir | `0xABC...` |
-| Share Percentage | `float` | Percentage of divisible assets (0.01-100). **All heirs must total exactly 100%.** Converted to basis points internally: `shareBps = percentage * 100` | `50` (= 5000 bps) |
-| Minimum Age | `uint8` | Minimum age required for ZKP verification (0-100). If 0, no age check needed. | `18` |
-| Birthdate Commitment | `uint256` | Poseidon hash of `(birthYear, birthMonth, birthDay)`. Used by the ZKP circuit to verify age without revealing birthdate. Enter `0` if no age check. | `8732451...` |
-| Vesting Period | `uint256` | Seconds after execution starts before heir can receive assets. `0` = immediate. | `2592000` (30 days) |
-
-**Formula:** Shares are in basis points. The UI validates:
-```
-totalShares = sum(heir.sharePercentage for all heirs)
-// Must equal 10000 (100%) to activate
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `heirAddress` | `address` | Heir's wallet address |
+| `sharePercentage` | `%` (converted to bps) | Enter as percentage (e.g., `50` for 50%). Converted to basis points internally: `50% → 5000 bps`. **All heirs must total exactly 100%.** |
+| `birthdateCommitment` | `uint256` | `birthYear + salt + willId` — generated by `generate_commitment.js`. Enter `0` to skip age verification. |
+| `minimumAge` | `uint8` | Required age for inheritance (e.g., `18`). Heir must submit ZKP proving `currentYear - birthYear >= minimumAge`. |
+| `vestingPeriod` | `uint256` | Lock period in seconds after execution. `0` = immediate release. |
 
 #### Step 3: Deposit Assets
+Supports 4 asset types:
 
-**Asset Types:**
-| Asset Type | Parameters | On-Chain Function |
-|------------|-----------|-------------------|
-| **ETH** | Amount (e.g., `0.5`) | `addETHAsset(willId, {value: parseEther(amount)})` |
-| **ERC-20** | Token contract address + amount | Auto-calls `token.approve(willContract, amount)` then `addERC20Asset(willId, tokenAddr, amount)` |
-| **ERC-721** | NFT contract + Token ID + Specific Heir address | Auto-calls `nft.approve(willContract, tokenId)` then `addERC721Asset(willId, nftAddr, tokenId, specificHeir)` |
-| **ERC-1155** | Token contract + Token ID + Amount + Specific Heir (if amount=1) | Auto-calls `token.setApprovalForAll(willContract, true)` then `addERC1155AssetFungible()` or `addERC1155AssetNFT()` |
+| Asset Type | Contract Function | Approval Required |
+|------------|------------------|-------------------|
+| **ETH** | `addETHAsset(willId)` with `msg.value` | None |
+| **ERC-20** | `addERC20Asset(willId, tokenAddr, amount)` | `approve(willContract, amount)` auto-called |
+| **ERC-721** | `addERC721Asset(willId, tokenAddr, tokenId, specificHeir)` | `approve(willContract, tokenId)` auto-called |
+| **ERC-1155** | `addERC1155AssetFungible/NFT(...)` | `setApprovalForAll(willContract, true)` auto-called |
 
-**Divisible vs. Indivisible:**
-- ETH and ERC-20 are **divisible** — split by heir percentage: `heirAmount = (total * share) / 10000`
-- ERC-721 NFTs are **indivisible** — assigned to a `specificHeir` address (1:1)
-- ERC-1155 with amount > 1 is **divisible** (fungible tokens); amount = 1 is **indivisible** (NFT)
-
-#### Step 4: Activate Will
-
-Displays a summary (heirs count, total shares, assets deposited) and an activation button. **Activation locks the will** — no more heirs or assets can be added. The heartbeat timer starts immediately with `lastHeartbeat = block.timestamp`.
+#### Step 4: Activate
+Calls `activateWill(willId)`. Requires:
+- At least 1 heir added
+- Heir shares total exactly 10000 bps (100%)
+- The heartbeat timer starts immediately upon activation
 
 ---
 
 ### 4. Manage Will
 
-The Manage Will tab provides owner-side will administration functions.
+![Manage Will - Top](screenshots/04-manage-will-top.png)
+![Manage Will - Bottom](screenshots/05-manage-will-bottom.png)
 
-![Manage Will - Top Section](screenshots/04-manage-will-top.png)
-![Manage Will - Bottom Section](screenshots/05-manage-will-bottom.png)
-![Manage Will - Rotate Heir Address](screenshots/06-manage-will-rotate-heir.png)
+Eight management operations:
 
-#### Cancel Will
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | The numeric ID of the will to cancel |
-
-Calls `cancelWill(willId)`. Only works from `Created` or `Active` states. Returns deposited ETH to the owner.
-
-#### Recover Will
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | The will to recover |
-
-Calls `recoverWill(willId)`. Owner proves they're alive by calling this from `OwnerInactive` or `GracePeriod` state. Resets the will back to `Active` and updates `lastHeartbeat`.
-
-#### Set Fallback Beneficiary
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | Target will |
-| Beneficiary Address | New fallback address for unclaimed assets |
-
-#### Set Heartbeat Interval
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | Target will |
-| Interval (days) | Custom heartbeat interval. **Min: 7 days, Max: 365 days.** Converted to seconds: `interval * 86400` |
-
-**Formula:**
-```
-newInterval = inputDays * 86400  // convert days to seconds
-require(newInterval >= 604800 && newInterval <= 31536000)  // 7-365 days range
-```
-
-#### Register DID
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | Target will |
-| DID Hash | SHA-256 hash of your iden3/Privado DID string, modulo the BN128 scalar field `r` |
-
-**How to compute DID Hash:**
-```
-didHash = SHA256("did:iden3:polygon:mumbai:YOUR_DID_STRING") mod r
-// Where r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-```
-
-Registers the DID in the on-chain `didRecords` mapping and links it to the will, enabling DID-based ZKP heartbeats.
-
-#### Raise Dispute
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | Target will |
-| Reason | Text description of the dispute |
-| Bond Amount (ETH) | Must be >= `DISPUTE_BOND` (0.1 ETH) |
-
-Calls `disputeExecution{value: bond}(owner, willId, reason)`. Pauses the will into `Disputed` state. The dispute must be resolved within `DISPUTE_PERIOD` (7 days).
-
-#### Resolve Dispute (Owner)
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | Target will (caller must be owner) |
-| Dispute ID | The numeric dispute ID |
-
-Owner resolves the dispute. Will returns to `Active` state.
-
-#### Resolve Expired Dispute
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | Target will |
-| Dispute ID | The expired dispute ID |
-
-Anyone can call after `DISPUTE_PERIOD` (7 days) expires. Returns the will to its pre-dispute state.
+| Card | Function | Parameters | Description |
+|------|----------|------------|-------------|
+| **Cancel Will** | `cancelWill(willId)` | `willId` | Reclaim all deposited assets. Works in Created, Active, OwnerInactive, or GracePeriod states. |
+| **Recover Will** | `recoverWill(willId)` | `willId` | Owner recovers from OwnerInactive/GracePeriod back to Active. |
+| **Set Fallback** | `setFallbackBeneficiary(willId, addr)` | `willId`, `beneficiary address` | Update the address that receives unclaimed assets after the deadline. |
+| **Set Heartbeat Interval** | `setHeartbeatInterval(willId, interval)` | `willId`, `interval (seconds)` | Custom heartbeat interval. Default is 180 days = `15552000` seconds. |
+| **Register DID** | `registerDID(willId, didHash)` | `willId`, `DID hash (uint256)` | Register your iden3/Privado DID hash for ZKP-based liveness heartbeats. Use `SHA256(did_string) mod BN128_FIELD` as the hash. |
+| **Raise Dispute** | `disputeExecution(owner, willId, reason)` | `owner`, `willId`, `reason`, `0.1 ETH bond` | Challenge an execution. Requires `DISPUTE_BOND` (0.1 ETH) as deposit. |
+| **Resolve Dispute (Owner)** | `resolveDisputeAsOwner(willId, disputeId)` | `willId`, `disputeId` | Owner proves liveness to resolve the dispute. |
+| **Resolve Expired** | `resolveExpiredDispute(owner, willId, disputeId)` | `owner`, `willId`, `disputeId` | Resolve after `DISPUTE_PERIOD` (30 days) expires. |
 
 #### Rotate Heir Address (EIP-712)
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | Target will |
-| Heir Index | Index of the heir to update (0-based) |
-| New Address | New Ethereum address for the heir |
-| Deadline | Unix timestamp after which the signature expires |
-| EIP-712 Signature | Signed message from the **current heir address** authorizing the rotation |
 
-**EIP-712 Typed Data Structure:**
-```
-HeirRotation(
-  address owner,
-  uint256 willId,
-  uint256 heirIndex,
-  address oldAddress,
-  address newAddress,
-  uint256 nonce,
-  uint256 deadline
-)
-```
+![Rotate Heir Address](screenshots/06-manage-will-rotate-heir.png)
 
-The heir signs this typed data with their current private key. The contract verifies the signature, checks the nonce and deadline, and updates the heir address. This allows heirs to rotate to a new wallet without exposing personal information on-chain.
+Calls `rotateHeirAddress(owner, willId, heirIndex, newAddress, deadline, signature)`.
+
+This allows an heir to update their receiving address using an **EIP-712 typed signature**. The current heir signs a message authorizing the rotation, and anyone can submit the transaction.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `Will Owner` | `address` | The will owner's address |
+| `Will ID` | `uint256` | Target will |
+| `Heir Index` | `uint256` | Position of the heir (0-indexed) |
+| `New Address` | `address` | New wallet address for the heir |
+| `Deadline` | `uint256` | Unix timestamp after which the signature expires |
+| `Heir Signature` | `bytes` | EIP-712 signature from the current heir authorizing the rotation |
 
 ---
 
 ### 5. Heartbeat & Liveness
 
-The Heartbeat tab manages the owner liveness system — the core mechanism that replaces traditional trustees.
+![Heartbeat - Top](screenshots/07-heartbeat-top.png)
+![Heartbeat - Bottom](screenshots/08-heartbeat-bottom.png)
 
-![Heartbeat - Top Section](screenshots/07-heartbeat-top.png)
-![Heartbeat - Bottom Section](screenshots/08-heartbeat-bottom.png)
+The heartbeat system is the core liveness detection mechanism. Eight operations across two categories:
 
-#### Record Heartbeat (Simple)
-| Parameter | Description |
-|-----------|-------------|
-| Will ID | The active will to heartbeat |
+#### Liveness Proofs (Top Row)
 
-Calls `recordHeartbeat(willId)`. Sets `will.lastHeartbeat = block.timestamp`. This is the simplest liveness proof — just a transaction from the owner's wallet.
+| Card | Function | Parameters | Description |
+|------|----------|------------|-------------|
+| **Record Heartbeat** | `recordHeartbeat(willId)` | `willId` | Simple on-chain transaction proving the owner is alive. Resets the inactivity timer: `lastHeartbeat = block.timestamp`. |
+| **Set Delegate** | `setHeartbeatDelegate(delegate)` | `delegate address` | Allow a trusted person (family member, attorney) to record heartbeats on your behalf. |
+| **Delegate Heartbeat** | `recordHeartbeatByDelegate(owner, willId)` | `owner address`, `willId` | Called by an authorized delegate. Must be pre-authorized via `setHeartbeatDelegate()`. |
+| **DID Liveness Heartbeat (ZKP)** | `recordHeartbeatWithDIDProof(willId, pA, pB, pC, pubSignals)` | `willId`, Groth16 proof components, 5 public signals | Submit a ZKP from iden3/Privado face-liveness verification. See [DID Liveness Proof](#2-did-liveness-proof-groth16--5-signals) for how to generate the proof values. |
 
-**When to heartbeat:**
+**DID Liveness Heartbeat parameters in detail:**
+
+| Field | Format | Source |
+|-------|--------|--------|
+| `Proof A` | `["<pi_a[0]>", "<pi_a[1]>"]` | From `output/proof.json` → `pi_a` (skip index 2 which is always "1") |
+| `Proof B` | `[["<pi_b[0][0]>","<pi_b[0][1]>"],["<pi_b[1][0]>","<pi_b[1][1]>"]]` | From `output/proof.json` → `pi_b` (skip the `["1","0"]` row) |
+| `Proof C` | `["<pi_c[0]>", "<pi_c[1]>"]` | From `output/proof.json` → `pi_c` (skip index 2) |
+| `Public Signals` | `["isValid","didHash","expDate","nonce","timestamp"]` | From `output/public.json` — 5 values in order |
+
+#### Death Confirmation Flow (Bottom Row)
+
+| Card | Function | Who Can Call | When |
+|------|----------|-------------|------|
+| **Detect Inactivity** | `detectInactivity(owner, willId)` | Anyone | After `lastHeartbeat + heartbeatInterval` has passed |
+| **Start Grace Period** | `startGracePeriod(owner, willId)` | Anyone | After `INACTIVITY_CONFIRMATION_DELAY` (30 days) from detection |
+| **Finalize Grace Period** | `finalizeGracePeriod(owner, willId)` | Registered heirs only | After `GRACE_PERIOD_DURATION` (90 days) from grace start |
+| **Check Inactivity Status** | `isOwnerInactive(owner, willId)` | Anyone (read-only) | Anytime — returns `true` if heartbeat has expired |
+
+**Timeline formula:**
 ```
-timeRemaining = (lastHeartbeat + heartbeatInterval) - block.timestamp
-// Heartbeat before timeRemaining reaches 0 to prevent OwnerInactive trigger
+detectInactivity:    block.timestamp > lastHeartbeat + heartbeatInterval
+startGracePeriod:    block.timestamp > inactivityDetectedAt + INACTIVITY_CONFIRMATION_DELAY
+finalizeGracePeriod: block.timestamp > gracePeriodStartedAt + GRACE_PERIOD_DURATION
 ```
-
-#### Set Heartbeat Delegate
-| Parameter | Description |
-|-----------|-------------|
-| Delegate Address | Address authorized to heartbeat on your behalf |
-
-Calls `setHeartbeatDelegate(delegate)`. Use case: A family member who can heartbeat if the owner is temporarily unavailable (e.g., hospitalized). The delegate can record heartbeats for ALL of the owner's wills.
-
-#### Delegate Heartbeat
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner Address | The will owner's address |
-| Will ID | The will to heartbeat |
-
-Calls `recordHeartbeatByDelegate(owner, willId)`. Only works if `msg.sender == heartbeatDelegates[owner]`.
-
-#### DID Liveness Heartbeat (ZKP)
-
-This is the **strongest form of liveness proof**, using a Groth16 zero-knowledge proof from the owner's iden3/Privado DID credential.
-
-| Parameter | Type | Description | Example Value |
-|-----------|------|-------------|---------------|
-| Will ID | `uint256` | The active will | `0` |
-| Proof A | JSON `[a0, a1]` | First element of the Groth16 proof (2 field elements) | `["0x1234...", "0x5678..."]` |
-| Proof B | JSON `[[b00,b01],[b10,b11]]` | Second element (2x2 matrix of field elements) | `[["0x...","0x..."],["0x...","0x..."]]` |
-| Proof C | JSON `[c0, c1]` | Third element (2 field elements) | `["0x...", "0x..."]` |
-| Public Signals | JSON `[isValid, didHash, expDate, nonce, timestamp]` | 5 public signals | `["1","123456","1735689600","1","1711234567"]` |
-
-**Public Signals Explained:**
-
-| Index | Signal | Type | Description |
-|-------|--------|------|-------------|
-| 0 | `isValid` | `uint256` | Must be `1` — the proof asserts the DID credential is valid |
-| 1 | `didHash` | `uint256` | Must match `will.ownerDidHash` — the SHA-256 hash of the DID |
-| 2 | `expirationDate` | `uint256` | Unix timestamp of credential expiration. Must be > `block.timestamp` |
-| 3 | `revocationNonce` | `uint256` | One-time nonce to prevent replay. Each nonce can only be used once |
-| 4 | `currentTimestamp` | `uint256` | Must be within 300 seconds (5 minutes) of `block.timestamp` |
-
-**Validation Formula (on-chain):**
-```
-require(pubSignals[0] == 1)                                    // valid proof
-require(pubSignals[1] == will.ownerDidHash)                    // DID matches
-require(pubSignals[2] > block.timestamp)                       // not expired
-require(!usedLivenessNonces[pubSignals[3]])                    // fresh nonce
-require(|pubSignals[4] - block.timestamp| <= 300)              // 5-min window
-require(livenessVerifier.verifyProof(pA, pB, pC, pubSignals))  // Groth16 valid
-```
-
-**Where to get these values:** Generate them using the iden3/Privado SDK or snarkJS with the corresponding circom circuit. The proof is generated off-chain and submitted on-chain for verification.
-
-#### Detect Inactivity
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | The will to check |
-
-**Anyone** can call `detectInactivity(owner, willId)`. Transitions from `Active` -> `OwnerInactive` if:
-```
-block.timestamp > will.lastHeartbeat + heartbeatInterval(will)
-```
-
-#### Start Grace Period
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | The will |
-
-**Anyone** can call after `INACTIVITY_CONFIRMATION_DELAY` (30 days). Transitions `OwnerInactive` -> `GracePeriod`:
-```
-require(block.timestamp >= will.inactivityDetectedAt + INACTIVITY_CONFIRMATION_DELAY)
-```
-
-#### Finalize Grace Period
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Address of the will owner |
-| Will ID | The will |
-
-Only a **registered heir** can call after `GRACE_PERIOD_DURATION` (90 days). Transitions `GracePeriod` -> `PendingHeirProof`:
-```
-require(block.timestamp >= will.gracePeriodStartedAt + GRACE_PERIOD_DURATION)
-```
-
-#### Check Inactivity Status
-| Parameter | Description |
-|-----------|-------------|
-| Owner Address | Address to check (defaults to connected wallet) |
-| Will ID | The will to check |
-
-Read-only call to `isOwnerInactive(owner, willId)`. Returns `true` if the heartbeat has expired, `false` if the owner is still active.
 
 ---
 
 ### 6. Inheritance Execution
 
-After the grace period is finalized, heirs must verify their age, then the inheritance is executed.
+![Inheritance - Top](screenshots/09-inheritance-top.png)
+![Inheritance - Scrolled](screenshots/10-inheritance-scrolled.png)
 
-![Inheritance - ZKP Verification & Execution](screenshots/09-inheritance-top.png)
-![Inheritance - Full View](screenshots/10-inheritance-scrolled.png)
+After grace period finalization, the will enters **PendingHeirProof** state. Four operations:
 
-#### Verify Heir Age (ZKP)
+| Card | Function | Parameters | Description |
+|------|----------|------------|-------------|
+| **Verify Heir Age (ZKP)** | `verifyHeirAge(owner, willId, heirIndex, pA, pB, pC, pubSignals)` | owner, willId, heirIndex, Groth16 proof (4 public signals) | Each heir submits their own age proof. See [Age Verification ZKP](#1-age-verification-zkp-groth16--4-signals). |
+| **Execute Inheritance (Batch)** | `executeInheritanceBatch(owner, willId, batchSize)` | owner, willId, batchSize (max 10) | Distribute assets to verified heirs. Uses auto-push with pull fallback. Call multiple times if >10 assets. |
+| **Reset Expired Heir Proof** | `resetExpiredHeirProof(owner, willId)` | owner, willId | If heirs fail to submit proofs within `HEIR_PROOF_DEADLINE` (180 days), reset back to GracePeriod. |
+| **Rescue Stuck NFT** | `rescueStuckNFT(owner, willId, assetIndex, receiver)` | owner, willId, assetIndex, receiver address | If an NFT transfer failed during execution (recipient rejected it), the designated heir can retry to a different address. |
 
-Each heir must submit a Groth16 proof to verify they meet the minimum age requirement.
+**Age verification proof parameters:**
 
-| Parameter | Type | Description | Example |
-|-----------|------|-------------|---------|
-| Will Owner Address | `address` | The will creator's address | `0x742d...` |
-| Will ID | `uint256` | The will ID | `0` |
-| Heir Index | `uint256` | 0-based index of the heir | `0` |
-| Proof A | JSON `[a0, a1]` | Groth16 proof element A | `["0x...","0x..."]` |
-| Proof B | JSON `[[b00,b01],[b10,b11]]` | Groth16 proof element B | `[["0x...","0x..."],["0x...","0x..."]]` |
-| Proof C | JSON `[c0, c1]` | Groth16 proof element C | `["0x...","0x..."]` |
-| Public Signals | JSON `[willId, minAge, year, commitment]` | 4 public signals | `["0","18","2026","87324..."]` |
-
-**Public Signals for Age Verification:**
-
-| Index | Signal | Description |
-|-------|--------|-------------|
-| 0 | `willId` | Must match the will being claimed |
-| 1 | `minimumAge` | Must match the heir's `minimumAge` set during will creation |
-| 2 | `currentYear` | The current year (e.g., `2026`) |
-| 3 | `birthdateCommitment` | Must match the Poseidon hash stored for this heir: `Poseidon(birthYear, birthMonth, birthDay)` |
-
-**Circuit Logic:**
-```
-// The ZK circuit proves (without revealing birthdate):
-currentYear - birthYear >= minimumAge
-Poseidon(birthYear, birthMonth, birthDay) == birthdateCommitment
-```
-
-#### Execute Inheritance (Batch)
-
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner Address | The will creator |
-| Will ID | The will to execute |
-| Batch Size | Number of heirs to process per transaction (max 10) |
-
-Calls `executeInheritanceBatch(owner, willId, batchSize)`. The execution uses a **hybrid auto-push with pull-based fallback**:
-
-1. **Divisible assets (ETH, ERC-20, ERC-1155 fungible):** The contract calculates each heir's share and attempts an auto-push transfer with a gas limit of 50,000. If the push fails (recipient is a contract that reverts), the amount is stored in `pendingETH`/`pendingERC20`/`pendingERC1155` for pull-based claiming.
-
-2. **Indivisible assets (ERC-721, ERC-1155 NFT):** Transferred directly to the `specificHeir`. If the transfer fails, the asset is marked as "stuck" and can be rescued later.
-
-**Distribution Formula:**
-```
-// For each divisible asset and each heir:
-heirAmount = (asset.amount * heir.sharePercentage) / 10000
-
-// Auto-push attempt:
-(success, ) = heir.heirAddress.call{value: heirAmount, gas: AUTO_PUSH_GAS_LIMIT}("")
-if (!success) {
-    pendingETH[heir.heirAddress] += heirAmount;  // fallback to pull
-}
-```
-
-#### Reset Expired Heir Proof
-
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | The will owner |
-| Will ID | Target will |
-
-If heirs fail to submit age proofs within `HEIR_PROOF_DEADLINE` (180 days), anyone can call this to reset the will back to `GracePeriod`.
-
-#### Rescue Stuck NFT
-
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | The will owner |
-| Will ID | Target will |
-| Asset Index | Index of the stuck NFT asset |
-| New Receiver Address | Alternative address to send the NFT to |
-
-If an NFT transfer failed during execution (e.g., the heir's address is a contract that doesn't support `onERC721Received`), the designated heir can retry the transfer to a different address.
+| Field | Format | Source |
+|-------|--------|--------|
+| `Proof A` | `["<pi_a[0]>", "<pi_a[1]>"]` | From `age-verification-zkp/proof.json` |
+| `Proof B` | `[["<pi_b[0][0]>","<pi_b[0][1]>"],["<pi_b[1][0]>","<pi_b[1][1]>"]]` | From `age-verification-zkp/proof.json` |
+| `Proof C` | `["<pi_c[0]>", "<pi_c[1]>"]` | From `age-verification-zkp/proof.json` |
+| `Public Signals` | `["willId", "minimumAge", "currentYear", "commitment"]` | From `age-verification-zkp/public.json` — 4 values |
 
 ---
 
 ### 7. Claims (Pull-Based)
 
-After inheritance execution, heirs claim their allocated assets.
+![Claims - Top](screenshots/11-claims-top.png)
+![Claims - Bottom](screenshots/12-claims-bottom%20.png)
 
-![Claims - Top Section](screenshots/11-claims-top.png)
-![Claims - All Sections](screenshots/12-claims-bottom.png)
-![Claims - Sweep Functions](screenshots/13-claims-sweep.png)
+When auto-push fails during execution, assets are stored in pending balances. Heirs claim them manually.
 
-#### Your Pending Claims
+**Your Pending Claims** section shows:
+- `pendingETH(address)` — unclaimed ETH balance
+- `pendingERC20(address, tokenAddress)` — unclaimed ERC-20 balance
 
-Displays the connected wallet's pending ETH balance (auto-loaded on page visit):
-```
-pendingETH = contract.pendingETH(walletAddress)
-// Displayed as: "X.XX ETH"
-```
+| Card | Function | Parameters | Description |
+|------|----------|------------|-------------|
+| **Claim ETH** | `claimETH()` | None | Withdraw all pending ETH to your wallet |
+| **Claim ERC-20** | `claimERC20(tokenAddress)` | ERC-20 contract address | Withdraw pending ERC-20 tokens |
+| **Claim ERC-1155** | `claimERC1155(tokenAddress, tokenId)` | ERC-1155 contract address, token ID | Withdraw pending ERC-1155 tokens |
+| **Sweep Unclaimed ETH** | `sweepUnclaimedETH(owner, willId)` | owner, willId | Fallback beneficiary sweeps unclaimed ETH after `UNCLAIMED_ASSET_DEADLINE` (365 days) |
 
-#### Claim ETH
-No parameters — calls `claimETH()`. Transfers all `pendingETH[msg.sender]` to the caller.
+![Claims - Sweep](screenshots/13-claims-sweep.png)
 
-#### Claim ERC-20 Tokens
-| Parameter | Description |
-|-----------|-------------|
-| Token Contract Address | The ERC-20 token to claim |
-| Token to Claim | Same address (for the transaction) |
-
-Calls `claimERC20(tokenAddress)`. Transfers all `pendingERC20[msg.sender][token]`.
-
-#### Claim ERC-1155 Tokens
-| Parameter | Description |
-|-----------|-------------|
-| Token Contract | The ERC-1155 contract address |
-| Token ID | The specific token ID to claim |
-
-Calls `claimERC1155(tokenAddress, tokenId)`. Transfers `pendingERC1155[msg.sender][token][tokenId]`.
-
-#### Sweep Unclaimed ETH / ERC-20 / ERC-1155
-| Parameter | Description |
-|-----------|-------------|
-| Will Owner | Original will creator |
-| Will ID | Target will |
-| Token Contract | (for ERC-20/ERC-1155) |
-| Token ID | (for ERC-1155 only) |
-
-After `UNCLAIMED_ASSET_DEADLINE` (365 days from execution), the **fallback beneficiary** can sweep any unclaimed assets. This prevents funds from being locked forever if an heir never claims.
+| Card | Function | Parameters | Description |
+|------|----------|------------|-------------|
+| **Sweep ERC-20** | `sweepUnclaimedERC20(owner, willId, token)` | owner, willId, token address | Sweep unclaimed ERC-20 after deadline |
+| **Sweep ERC-1155** | `sweepUnclaimedERC1155(owner, willId, token, tokenId)` | owner, willId, token address, token ID | Sweep unclaimed ERC-1155 after deadline |
 
 ---
 
 ### 8. Test Tokens
 
-The Test Tokens tab provides faucets and utilities for testing with mock tokens.
-
 ![Test Tokens](screenshots/14-test-tokens.png)
 
-#### Setup
-1. Deploy test token contracts from Remix IDE
-2. Paste the deployed addresses in the **Test Token Addresses** section
-3. Click **Save Addresses** — addresses persist in `localStorage`
+Deploy test tokens from `Solidity-code/TestTokens/` on Sepolia, then enter their addresses in the **Save Addresses** section. Three faucets:
 
-#### TestUSDC (ERC-20)
-- **Faucet**: Call `faucet()` to mint 1,000 USDC (18 decimals) to your wallet
-- **Balance Check**: Displays your current TestUSDC balance
-
-#### CryptoArtNFT (ERC-721)
-- **Mint**: Enter a metadata URI and call `safeMint(yourAddress, tokenURI)` to mint a unique NFT
-- Each mint increments the token ID automatically
-
-#### GameAssetsNFT (ERC-1155)
-- **Faucet**: Enter Token ID and Amount, calls `faucet(tokenId, amount)` to mint semi-fungible game assets
-- **Balance Check**: Enter Token ID to check your balance of a specific token
+| Card | Standard | Function | Description |
+|------|----------|----------|-------------|
+| **TestUSDC** | ERC-20 | `faucet()` / `balanceOf(address)` | Mint 1000 USDC. Check balance. |
+| **CryptoArtNFT** | ERC-721 | `mintNFT(metadataURI)` | Mint an NFT with a metadata URI (e.g., IPFS link). |
+| **GameAssetsNFT** | ERC-1155 | `faucet()` / `balanceOf(address, tokenId)` | Mint game items (token IDs 1-3). Check per-token balance. |
 
 ---
 
-## ZKP Integration Details
+## Backend API
 
-### Groth16 Proof Structure
-
-Both verifiers use the same Groth16 proof format from snarkJS/iden3:
-
-```
-Proof = {
-  pi_a: [a0, a1],              // 2 field elements (G1 point)
-  pi_b: [[b00, b01], [b10, b11]],  // 2x2 field elements (G2 point)
-  pi_c: [c0, c1]               // 2 field elements (G1 point)
-}
-```
-
-All values are `uint256` strings representing BN128 curve points.
-
-### Age Verifier (4-signal circuit)
-
-**File:** `Solidity-code/ZKProofs/AgeVerifier.sol`
-
-```
-verifyProof(
-  uint[2] pA,        // proof.pi_a
-  uint[2][2] pB,     // proof.pi_b
-  uint[2] pC,        // proof.pi_c
-  uint[4] pubSignals // [willId, minimumAge, currentYear, birthdateCommitment]
-) returns (bool)
-```
-
-### Liveness Verifier (5-signal circuit)
-
-**File:** `Solidity-code/ZKProofs/Verifier.sol`
-
-```
-verifyProof(
-  uint[2] pA,        // proof.pi_a
-  uint[2][2] pB,     // proof.pi_b
-  uint[2] pC,        // proof.pi_c
-  uint[5] pubSignals // [isValid, didHash, expirationDate, revocationNonce, timestamp]
-) returns (bool)
-```
-
-### Generating Proofs (Off-chain)
-
-Proofs are generated using **snarkJS** with the corresponding circom circuits:
-
-```bash
-# Generate age proof
-snarkjs groth16 fullprove input.json age_circuit.wasm age_circuit_final.zkey proof.json public.json
-
-# Generate liveness proof (via iden3/Privado SDK)
-# The SDK handles credential fetching, circuit compilation, and proof generation
-```
-
-The JSON output from snarkJS maps directly to the UI fields:
-- `proof.json` -> `pi_a`, `pi_b`, `pi_c` fields
-- `public.json` -> Public Signals field
-
----
-
-## Backend API Reference
-
-The Express.js backend runs on port 3001 and provides read-only blockchain queries.
+The Node.js/Express backend provides read-only blockchain queries at `http://localhost:3001`:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/health` | GET | Health check, returns `{status: "ok", timestamp}` |
-| `/api/wills/:contract/:owner` | GET | Get all wills for an owner |
-| `/api/wills/:contract/:owner/:willId` | GET | Get detailed will info (assets, heirs, state) |
-| `/api/claims/:contract/:address` | GET | Check pending ETH/ERC20 claims for an address |
-| `/api/constants/:contract` | GET | Get system constants from the contract |
+| `/api/health` | GET | Health check |
+| `/api/wills/:contract/:owner` | GET | List all wills for an owner |
+| `/api/wills/:contract/:owner/:willId` | GET | Get will details with assets and heirs |
+| `/api/claims/:contract/:address` | GET | Check pending ETH/ERC-20 balances |
+| `/api/constants/:contract` | GET | Get system timing constants |
 | `/api/inactivity/:contract/:owner/:willId` | GET | Check if owner is inactive |
-| `/api/events/:contract` | GET | Get recent events (last N blocks) |
+| `/api/events/:contract` | GET | Query recent contract events (last 1000 blocks) |
 
-**Query Parameters:** All endpoints accept `?rpc=RPC_URL` to override the default provider.
+All endpoints accept an optional `?rpc=<URL>` query parameter to specify a custom RPC endpoint. Defaults to `http://127.0.0.1:8545`.
 
 ---
 
-## Tech Stack
+## Running Locally
 
-| Layer | Technology |
-|-------|------------|
-| **Smart Contracts** | Solidity ^0.8.20, OpenZeppelin |
-| **ZKP** | Groth16 (snarkJS/iden3), Circom circuits |
-| **Frontend** | React.js 18, ethers.js v6, CSS custom properties |
-| **Backend** | Node.js, Express.js 4, ethers.js v6 |
-| **Wallet** | MetaMask (EIP-1193 provider) |
-| **Testnet** | Ethereum Sepolia |
-| **Standards** | ERC-20, ERC-721, ERC-1155, EIP-712, EIP-170, EIP-3860 |
+### Prerequisites
+- Node.js 18+
+- MetaMask browser extension
+- Deployed contracts on Sepolia (or Remix VM)
+
+### Install & Start
+
+```bash
+# Clone the repository
+git clone https://github.com/Sanjoy-Chattopadhay/will-on-chain.git
+cd will-on-chain/will-app
+
+# Install all dependencies (frontend + backend)
+npm run install:all
+
+# Start both servers
+npm start
+# Frontend: http://localhost:3000
+# Backend:  http://localhost:3001
+```
+
+### ZKP Setup (Optional)
+
+```bash
+# Age Verification circuit
+cd age-verification-zkp
+npm install
+node scripts/generate_commitment.js    # Generate commitment for addHeir()
+
+# DID Liveness circuit
+cd proof-of-life
+npm install
+node scripts/parse_and_generate.js     # Generate proof from Privado credential
+```
 
 ---
 
@@ -859,56 +667,89 @@ The Express.js backend runs on port 3001 and provides read-only blockchain queri
 
 ```
 will-on-chain/
-├── Solidity-code/
-│   ├── WillTypes.sol              # Shared types and enums
-│   ├── WillStorage.sol            # Storage layout and constants
-│   ├── HeartbeatManager.sol       # Liveness proofs and death confirmation
-│   ├── AssetManager.sol           # Multi-asset deposit management
-│   ├── ExecutionManager.sol       # Batch inheritance distribution
-│   ├── WillManager.sol            # Top-level unified contract
-│   ├── ILivenessVerifier.sol      # DID verifier interface
-│   ├── ERC721FractionalWrapper.sol # NFT fractionalization
-│   ├── NFTGovernanceWrapper.sol   # t-of-n NFT multisig
-│   ├── timestamp.sol              # Timestamp utility
-│   ├── TestTokens/
-│   │   ├── TestUSDC.sol           # Mock ERC-20 with faucet
-│   │   ├── CryptoArtNFT.sol       # Mock ERC-721 with mint
-│   │   ├── GameAssetsNFT.sol      # Mock ERC-1155 with faucet
-│   │   └── MockVerifier.sol       # Mock verifier for testing
-│   └── ZKProofs/
-│       ├── AgeVerifier.sol        # Groth16 4-signal age verifier
-│       ├── Verifier.sol           # Groth16 5-signal liveness verifier
-│       ├── AgeVerificationSystem.sol
-│       └── LivenessRegistry.sol
-├── will-app/
-│   ├── package.json               # Root package with install/start scripts
+├── Solidity-code/                    # Smart contracts
+│   ├── WillTypes.sol                 # Enums, structs, constants
+│   ├── WillStorage.sol               # State variables and mappings
+│   ├── HeartbeatManager.sol          # Heartbeat and DID liveness
+│   ├── AssetManager.sol              # Multi-asset deposit logic
+│   ├── ExecutionManager.sol          # Batch execution and claims
+│   ├── WillManager.sol               # Will lifecycle and disputes (= UnifiedWillManager)
+│   ├── ILivenessVerifier.sol         # Liveness verifier interface
+│   ├── ERC721FractionalWrapper.sol   # NFT fractionalization
+│   ├── NFTGovernanceWrapper.sol      # t-of-n multisig for shared NFTs
+│   ├── timestamp.sol                 # Timestamp utilities
+│   ├── ZKProofs/                     # Groth16 verifier contracts
+│   │   ├── AgeVerifier.sol           # 4-signal age verifier
+│   │   ├── Verifier.sol              # 5-signal liveness verifier
+│   │   ├── AgeVerificationSystem.sol # Age verification wrapper
+│   │   └── LivenessRegistry.sol      # On-chain DID record storage
+│   └── TestTokens/                   # Test token contracts
+│       ├── TestUSDC.sol              # ERC-20 faucet
+│       ├── CryptoArtNFT.sol          # ERC-721 mintable
+│       ├── GameAssetsNFT.sol         # ERC-1155 faucet
+│       └── MockVerifier.sol          # Always-true verifier for testing
+│
+├── age-verification-zkp/             # Heir age verification ZKP
+│   ├── circuits/
+│   │   └── ageVerification.circom    # Circom circuit (6 signals)
+│   ├── build/
+│   │   ├── ageVerification.wasm      # Compiled circuit
+│   │   ├── circuit_final.zkey        # Proving key
+│   │   ├── verification_key.json     # Verification key
+│   │   └── AgeVerifier.sol           # Generated Solidity verifier
+│   ├── input/
+│   │   └── heir_data.json            # Heir birth data for commitment
+│   ├── scripts/
+│   │   └── generate_commitment.js    # Commitment generator for will owners
+│   ├── proof.json                    # Example generated proof
+│   └── public.json                   # Example public signals
+│
+├── proof-of-life/                    # DID liveness verification ZKP
+│   ├── circuits/
+│   │   └── liveness.circom           # Circom circuit (6 inputs, 5 public)
+│   ├── build/
+│   │   ├── liveness_js/liveness.wasm # Compiled circuit
+│   │   ├── liveness_final.zkey       # Proving key
+│   │   └── verification_key.json     # Verification key
+│   ├── contracts/
+│   │   ├── Verifier.sol              # Generated Solidity verifier
+│   │   └── LivenessRegistry.sol      # On-chain registry
+│   ├── input/
+│   │   └── credential.json           # Example Privado ID credential
+│   ├── output/
+│   │   ├── proof.json                # Generated proof
+│   │   ├── public.json               # Public signals [isValid, didHash, expDate, nonce, timestamp]
+│   │   └── remix_data.json           # Formatted for Remix IDE / web app
+│   └── scripts/
+│       └── parse_and_generate.js     # Credential parser + proof generator
+│
+├── will-app/                         # Web application
+│   ├── package.json                  # Root scripts (install:all, start)
 │   ├── backend/
-│   │   ├── server.js              # Express API for read-only queries
-│   │   ├── package.json
-│   │   └── .env.example
+│   │   ├── server.js                 # Express API (read-only blockchain queries)
+│   │   └── package.json
 │   └── frontend/
-│       ├── package.json
 │       ├── public/index.html
 │       └── src/
-│           ├── App.js             # Main component with 7 tabs
-│           ├── index.js            # React entry point
-│           ├── index.css           # Dark theme CSS
-│           ├── contracts/abis.js   # All contract ABIs
-│           ├── utils/web3.js       # ethers.js helpers
+│           ├── App.js                # Main app (wallet connection, tabs, routing)
+│           ├── index.js              # React entry point
+│           ├── index.css             # Dark theme CSS
+│           ├── contracts/abis.js     # All contract ABIs + constants
+│           ├── utils/web3.js         # ethers.js v6 helpers + formatters
 │           └── pages/
-│               ├── Dashboard.js
-│               ├── CreateWill.js
-│               ├── ManageWill.js
-│               ├── HeartbeatPage.js
-│               ├── InheritancePage.js
-│               ├── ClaimsPage.js
-│               └── TestTokens.js
-├── screenshots/                    # Application screenshots
-└── README.md
+│               ├── Dashboard.js      # Will listing + details
+│               ├── CreateWill.js     # 4-step creation wizard
+│               ├── ManageWill.js     # Cancel, recover, disputes, EIP-712 rotation
+│               ├── HeartbeatPage.js  # Heartbeat, delegation, DID ZKP, inactivity
+│               ├── InheritancePage.js # Age ZKP verification, batch execution
+│               ├── ClaimsPage.js     # Pull-based claims + sweep
+│               └── TestTokens.js     # Test token faucets
+│
+└── screenshots/                      # Application screenshots
 ```
 
 ---
 
 ## License
 
-This project is part of an academic research work. Smart contracts use MIT and GPL-3.0 licenses (Groth16 verifiers generated by snarkJS are GPL-3.0).
+This project is part of academic research. See the accompanying paper for citation details.
