@@ -2,8 +2,6 @@
 
 A fully decentralized, trustless will and inheritance execution system built on Ethereum. Owners create wills, deposit multi-asset portfolios (ETH, ERC-20, ERC-721, ERC-1155), assign heirs with percentage shares, and the system autonomously detects owner inactivity through a time-based heartbeat mechanism. Inheritance is executed on-chain only after a multi-phase confirmation pipeline — including zero-knowledge proof age verification (Groth16) and iden3/Privado DID-based liveness proofs — ensuring no single party can prematurely trigger asset distribution.
 
-> **Research Paper**: This implementation accompanies the research paper *"Decentralized Crypto-Asset Inheritance Using Smart Contracts, Zero-Knowledge Proofs, and DID-Based Liveness Verification"*.
-
 ---
 
 ## Table of Contents
