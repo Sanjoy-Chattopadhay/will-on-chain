@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+*/node_modules/
+will-app/frontend/node_modules/
+will-app/backend/node_modules/
+
+# Build output
+will-app/frontend/build/
+
+# Environment files
+.env
+.env.local
+.env.production
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude session files
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
