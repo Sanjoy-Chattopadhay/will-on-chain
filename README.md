@@ -2,7 +2,6 @@
 
 A fully decentralized, trustee-less will and crypto-asset inheritance system built on Ethereum. Owners create wills, deposit multi-asset portfolios (ETH, ERC-20, ERC-721, ERC-1155), assign percentage-based heirs, and rely on time-based liveness detection with zero-knowledge proof verification — all without any centralized authority or trusted third party.
 
-> **Research Paper:** This implementation accompanies the research paper *"Decentralized Blockchain-Based Will and Crypto-Asset Inheritance System with Zero-Knowledge Proof Verification"* which provides the formal specification, security proofs, and threat model analysis.
 
 ---
 
