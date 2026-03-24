@@ -70,14 +70,6 @@ WillTypes.sol          (Enums, structs, constants)
 | `NFTGovernanceWrapper.sol` | t-of-n threshold multisig for shared NFT governance |
 | `ILivenessVerifier.sol` | Interface for liveness verification |
 
-**Test tokens (for Sepolia testing):**
-| Contract | Standard | Purpose |
-|----------|----------|---------|
-| `TestUSDC.sol` | ERC-20 | Faucet: mint 1000 USDC per call |
-| `CryptoArtNFT.sol` | ERC-721 | Mint NFTs with metadata URI |
-| `GameAssetsNFT.sol` | ERC-1155 | Faucet: mint fungible game items |
-| `MockVerifier.sol` | — | Always-true verifier for testing |
-
 ---
 
 ## Will State Machine
